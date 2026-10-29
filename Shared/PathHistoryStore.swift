@@ -1,45 +1,16 @@
 import Foundation
 
-/// 主 App 与 Finder 扩展共享的目录位置
+/// 应用数据目录。原先要与 Finder 扩展共享，故优先用 App Group；
+/// 扩展移除后只剩单进程，直接用 Application Support 下的固定目录。
 enum SharedPaths {
-    static let appGroupID = "group.com.haoran.recentfolder"
-    static let extensionBundleID = "com.haoran.recentfolder.finder"
     static let logSubsystem = "com.haoran.recentfolder"
 
-    static var isSandboxed: Bool {
-        ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
-    }
-
-    /// 优先使用 App Group 容器；本地 ad-hoc 签名拿不到 App Group 时，
-    /// 退化到扩展自己的沙盒容器（宿主 App 未沙盒，可直接读写该目录）。
+    /// ~/Library/Application Support/RecentFolder
     static func sharedDirectory() -> URL {
-        // containerURL 在没有对应 entitlement 时也会返回一个路径，但目录不可创建/写入，
-        // 因此必须验证可用性后再采用
-        if let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID),
-           isUsable(group) {
-            return group
-        }
-        if isSandboxed {
-            return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-                .appendingPathComponent("Library/Application Support", isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Containers/\(extensionBundleID)/Data/Library/Application Support",
-                                    isDirectory: true)
-    }
-
-    /// 目录存在且可写，或能成功创建
-    private static func isUsable(_ url: URL) -> Bool {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: url.path) {
-            return fm.isWritableFile(atPath: url.path)
-        }
-        do {
-            try fm.createDirectory(at: url, withIntermediateDirectories: true)
-            return true
-        } catch {
-            return false
-        }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("RecentFolder", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }
 
     static var historyFileURL: URL {
@@ -47,7 +18,7 @@ enum SharedPaths {
     }
 }
 
-/// 最近文件夹历史的读写入口。文件级共享，两个进程各自读写同一份 JSON。
+/// 最近文件夹历史的读写入口，以 JSON 文件持久化。
 final class PathHistoryStore {
     static let shared = PathHistoryStore()
 

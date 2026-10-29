@@ -21,9 +21,7 @@ echo "    构建成功"
 # 工程目录在 iCloud 同步的「文稿」里，构建产物会被反复打上 com.apple.FinderInfo，
 # xattr -cr 清掉后立刻又被写回，codesign 必然报 "detritus not allowed"。
 # ~/Applications 不受 iCloud 管理，xattr 清得干净，签名才能成功。
-# Finder 扩展本身也只从 ~/Applications 或 /Applications 加载。
 INSTALL="$HOME/Applications/RecentFolder.app"
-APPEX="$INSTALL/Contents/PlugIns/RecentFolderFinder.appex"
 
 # 构建目录里那份 App 之前被手动启动过也会留在后台，统一按 bundle 路径前缀全部清掉，
 # 否则会出现多个菜单栏图标
@@ -47,14 +45,8 @@ else
 fi
 
 codesign --force --sign "$SIGN_ID" --timestamp=none \
-  --entitlements FinderExtension/FinderExtension.entitlements "$APPEX"
-codesign --force --sign "$SIGN_ID" --timestamp=none \
   --entitlements App/RecentFolder.entitlements "$INSTALL"
 codesign --verify --deep --strict "$INSTALL" && echo "    签名校验通过"
-
-echo "==> 注册 Finder 扩展"
-pluginkit -a "$INSTALL/Contents/PlugIns/RecentFolderFinder.appex" 2>/dev/null || true
-pluginkit -e use -i com.haoran.recentfolder.finder 2>/dev/null || true
 
 if [ "${1:-}" = "--verify" ]; then
   echo "==> 校验完成，未启动"

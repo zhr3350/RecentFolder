@@ -3,8 +3,8 @@ import os
 
 /// 采集访达当前打开的文件夹。
 ///
-/// FinderSync 的 targetedURL() 在 ad-hoc 签名下取不到值，
-/// 这里改由宿主 App（非沙盒）通过 AppleScript 问访达要前台窗口路径。
+/// Finder Sync 的 targetedURL() 在 ad-hoc 签名下恒为 nil（扩展已因此移除），
+/// 这里由宿主 App（非沙盒）通过 AppleScript 问访达要前台窗口路径。
 final class FinderPathTracker {
 
     private let logger = Logger(subsystem: SharedPaths.logSubsystem, category: "finder-path")
