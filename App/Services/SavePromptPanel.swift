@@ -67,10 +67,14 @@ final class SavePromptPanel {
             backing: .buffered,
             defer: false
         )
-        window.level = .floating
+        // 保存面板的 sheet 位于 .modalPanel 这一层，它自己的投影会落在紧贴下方的
+        // 小条上，看起来就像中间夹了一条灰缝。把小条抬到它上面，白色底就把阴影
+        // 盖住了，交界处是一条干净的硬边。
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.modalPanel.rawValue + 1)
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.hasShadow = true
+        // 小条自己不加阴影，否则会在面板交界处再压出一条灰带
+        window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         window.contentView = hosting
         window.setFrameOrigin(origin(for: size, near: axPanel))
@@ -147,8 +151,8 @@ final class SavePromptPanel {
             $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY))
         }?.visibleFrame ?? fallbackVisible
 
-        // 贴在面板正下方，左边缘对齐
-        var point = NSPoint(x: anchor.minX, y: anchor.minY - size.height - 8)
+        // 紧贴面板正下方，不留缝；左边缘对齐
+        var point = NSPoint(x: anchor.minX, y: anchor.minY - size.height)
         if point.y < visible.minY + 8 {
             // 面板贴着屏幕底部时，宁可放在屏幕最下方，也不翻到菜单栏下面——
             // 那样会离面板很远，反而挡住别的窗口标题栏
@@ -211,11 +215,22 @@ private struct SavePromptView: View {
                 .padding(.vertical, 6)
         }
         .frame(width: width)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+        // 和保存面板的白色内容区对齐，贴在下面才像同一块面板
+        .background(Color(nsColor: .textBackgroundColor))
+        // 顶部两角做成直角：小条要零缝隙贴在保存面板下方，
+        // 留圆角的话交界处会露出去两个小缺口，看起来像没贴住。
+        .clipShape(shape)
+        // 只描左、右、下三边。顶边再画一道线，等于在贴合处划出一条「缝」
+        .overlay(ThreeSideBorder(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+    }
+
+    private var shape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: 0,
+            bottomLeadingRadius: 10,
+            bottomTrailingRadius: 10,
+            topTrailingRadius: 0,
+            style: .continuous
         )
     }
 
@@ -275,6 +290,32 @@ private struct SavePromptView: View {
             }
         }
         .padding(.horizontal, 5)
+    }
+}
+
+// MARK: - 形状
+
+/// 左、右、下三边的描边，顶边不画
+private struct ThreeSideBorder: Shape {
+    var cornerRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let r = cornerRadius
+        let minX = rect.minX + 0.5
+        let maxX = rect.maxX - 0.5
+        let minY = rect.minY - 1      // 往上多画一点，顶部切口不会被裁出毛边
+        let maxY = rect.maxY - 0.5
+
+        var path = Path()
+        path.move(to: CGPoint(x: minX, y: minY))
+        path.addLine(to: CGPoint(x: minX, y: maxY - r))
+        path.addQuadCurve(to: CGPoint(x: minX + r, y: maxY),
+                          control: CGPoint(x: minX, y: maxY))
+        path.addLine(to: CGPoint(x: maxX - r, y: maxY))
+        path.addQuadCurve(to: CGPoint(x: maxX, y: maxY - r),
+                          control: CGPoint(x: maxX, y: maxY))
+        path.addLine(to: CGPoint(x: maxX, y: minY))
+        return path
     }
 }
 
