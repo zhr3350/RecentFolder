@@ -29,14 +29,18 @@ final class SavePromptPanel {
         dismiss()
         pickHandler = onPick
 
+        // 与保存面板等宽，视觉上像是面板长出来的一截
+        let width = max(300, axFrame(of: axPanel)?.width ?? 380)
+
         let view = SavePromptView(
             folders: folders,
+            width: width,
             onPick: { [weak self] path in
                 guard let self, let handler = self.pickHandler else { return }
                 logger.notice("用户选择跳转到 \(path, privacy: .public)")
                 dismiss()
-                // 等这次点击彻底结束再注入按键，避免和鼠标事件抢时序
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { handler(path) }
+                // 只留最小的间隔，让这次点击先结束，别和注入的按键抢时序
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { handler(path) }
             },
             onCancel: { [weak self] in
                 self?.logger.notice("用户关闭了小条，保存面板保持原位")
@@ -81,17 +85,29 @@ final class SavePromptPanel {
 
     // MARK: - 跟随保存面板
 
+    /// 保存面板一旦真的消失就收起小条，但判定要宽容：
+    /// - AX 查询偶发失败不能算「面板消失」，连续两次查不到才收（约 1 秒）
+    /// - 不按「前台 App 是否等于面板 pid」判断。沙盒 App 的保存面板由
+    ///   com.apple.appkit.xpc.openAndSavePanelService 代开，pid 天生不一致，
+    ///   按前台判断会在 1.5 秒内误收小条。
+    /// - 上限从 25 秒放宽到 2 分钟，用户输文件名时不会被打断。
     private func startWatchdog(pid: pid_t) {
         let startedAt = Date()
+        var missCount = 0
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let elapsed = Date().timeIntervalSince(startedAt)
-            if elapsed > 25 || !self.hasSavePanel(pid: pid) {
+            if Date().timeIntervalSince(startedAt) > 120 {
+                self.logger.notice("小条超时收起")
                 self.dismiss()
                 return
             }
-            // 用户切到别的 App 就把小条收起来；刚弹出时焦点切换有延迟，留 1.5s 缓冲
-            if elapsed > 1.5, NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+            if self.hasSavePanel(pid: pid) {
+                missCount = 0
+                return
+            }
+            missCount += 1
+            if missCount >= 2 {
+                self.logger.notice("保存面板已消失，收起小条")
                 self.dismiss()
             }
         }
@@ -114,10 +130,11 @@ final class SavePromptPanel {
 
     private func origin(for size: NSSize, near axPanel: AXUIElement) -> NSPoint {
         let primary = NSScreen.screens.first
-        let visible = NSScreen.main?.visibleFrame ?? primary?.visibleFrame ?? .zero
+        let fallbackVisible = NSScreen.main?.visibleFrame ?? primary?.visibleFrame ?? .zero
 
         guard let frame = axFrame(of: axPanel), let primary else {
-            return NSPoint(x: visible.maxX - size.width - 24, y: visible.maxY - size.height - 24)
+            return NSPoint(x: fallbackVisible.midX - size.width / 2,
+                           y: fallbackVisible.midY - size.height / 2)
         }
 
         // AX 用左上原点，Cocoa 用左下原点，以主屏上边缘为基准翻转
@@ -126,13 +143,15 @@ final class SavePromptPanel {
                             width: frame.width,
                             height: frame.height)
 
-        var point = NSPoint(x: anchor.maxX + 12, y: anchor.maxY - size.height)
-        if point.x + size.width > visible.maxX {
-            point.x = anchor.minX - size.width - 12      // 右边放不下就放左边
-        }
-        if point.x < visible.minX {
-            point.x = anchor.midX - size.width / 2        // 左右都放不下就放下面
-            point.y = anchor.minY - size.height - 8
+        // 用面板所在的那块屏幕做边界
+        let visible = NSScreen.screens.first {
+            $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY))
+        }?.visibleFrame ?? fallbackVisible
+
+        // 贴在面板正下方，左边缘对齐（宽度相同，所以就是整块对齐）
+        var point = NSPoint(x: anchor.minX, y: anchor.minY - size.height - 8)
+        if point.y < visible.minY + 8 {
+            point.y = anchor.maxY + 8          // 下方放不下就翻到上方
         }
         point.x = min(max(point.x, visible.minX + 8), visible.maxX - size.width - 8)
         point.y = min(max(point.y, visible.minY + 8), visible.maxY - size.height - 8)
@@ -167,81 +186,94 @@ private final class StripPanel: NSPanel {
 private struct SavePromptView: View {
 
     let folders: [FolderRecord]
+    let width: CGFloat
     let onPick: (String) -> Void
     let onCancel: () -> Void
+
+    @State private var hoveredPath: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().opacity(0.5)
-            ForEach(folders) { folder in
-                row(folder)
+            Divider()
+            VStack(spacing: 1) {
+                ForEach(folders) { folder in
+                    row(folder)
+                }
             }
-            Divider().opacity(0.5)
+            .padding(.vertical, 4)
+            Divider()
             Text("不点就保持系统原来的位置")
-                .font(.system(size: 9))
+                .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
         }
-        .frame(width: 272)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.regularMaterial)
-        )
+        .frame(width: width)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
         )
     }
 
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: "arrow.turn.down.right")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
             Text("跳到最近文件夹")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 13, weight: .semibold))
             Spacer(minLength: 8)
             Button(action: onCancel) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help("关闭")
+            .help("关闭，保存面板保持原位")
         }
-        .padding(.horizontal, 10)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
+        .padding(.horizontal, 12)
+        .padding(.top, 9)
+        .padding(.bottom, 8)
     }
 
     private func row(_ folder: FolderRecord) -> some View {
         Button {
             onPick(folder.path)
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "folder")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 14)
+            HStack(spacing: 9) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: folder.path))
+                    .resizable()
+                    .frame(width: 18, height: 18)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(folder.displayName)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 13))
                         .lineLimit(1)
                     Text(folder.path)
-                        .font(.system(size: 9))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hoveredPath == folder.path ? Color.primary.opacity(0.08) : .clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering {
+                hoveredPath = folder.path
+            } else if hoveredPath == folder.path {
+                hoveredPath = nil
+            }
+        }
+        .padding(.horizontal, 5)
     }
 }
 

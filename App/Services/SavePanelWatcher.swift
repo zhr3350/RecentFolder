@@ -178,51 +178,6 @@ final class SavePanelWatcher {
         return false
     }
 
-    // MARK: - 诊断
-
-    /// 写 AX 写值失败时把目标 App 的 AX 树落到 /tmp，便于排查结构变化
-    private func dumpAXTree(pid: pid_t, to file: String) {
-        let app = NSRunningApplication(processIdentifier: pid)
-        var lines: [String] = []
-        lines.append("time=\(Date())")
-        lines.append("target pid=\(pid) app=\(app?.localizedName ?? "?") bundle=\(app?.bundleIdentifier ?? "?")")
-
-        var budget = 240
-        walk(AXUIElementCreateApplication(pid), label: "app", depth: 0, budget: &budget, into: &lines)
-
-        // 沙盒 App 的保存面板有时由独立的远程服务进程托管
-        let services = ["com.apple.appkit.xpc.openAndSavePanelService"]
-        for bundleID in services {
-            for running in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
-                lines.append("")
-                lines.append("--- service \(bundleID) pid=\(running.processIdentifier) ---")
-                walk(AXUIElementCreateApplication(running.processIdentifier),
-                     label: "svc", depth: 0, budget: &budget, into: &lines)
-            }
-        }
-
-        try? lines.joined(separator: "\n").write(toFile: file, atomically: true, encoding: .utf8)
-    }
-
-    private func walk(_ element: AXUIElement, label: String, depth: Int,
-                      budget: inout Int, into lines: inout [String]) {
-        guard budget > 0, depth < 8 else { return }
-        budget -= 1
-        let role = string(element, kAXRoleAttribute) ?? "?"
-        let subrole = string(element, kAXSubroleAttribute) ?? ""
-        let identifier = string(element, kAXIdentifierAttribute) ?? ""
-        let title = string(element, kAXTitleAttribute) ?? ""
-        let indent = String(repeating: "  ", count: depth)
-        lines.append("\(indent)\(label) role=\(role) sub=\(subrole) id=\(identifier) title=\(title)")
-
-        for (index, child) in elements(element, kAXChildrenAttribute).enumerated() {
-            walk(child, label: "child[\(index)]", depth: depth + 1, budget: &budget, into: &lines)
-        }
-        for (index, sheet) in elements(element, "AXSheets").enumerated() {
-            walk(sheet, label: "sheet[\(index)]", depth: depth + 1, budget: &budget, into: &lines)
-        }
-    }
-
     // MARK: - 键盘注入
 
     private func jump(pid: pid_t, to path: String) {
@@ -230,23 +185,31 @@ final class SavePanelWatcher {
             logger.error("未获得辅助功能授权，无法自动跳转")
             return
         }
-        logger.notice("注入 ⌘⇧G 跳转到 \(path, privacy: .public)")
+        let front = NSWorkspace.shared.frontmostApplication
+        logger.notice("注入 ⌘⇧G 跳转到 \(path, privacy: .public)（前台=\(front?.localizedName ?? "?", privacy: .public) pid=\(front?.processIdentifier ?? -1)，目标 pid=\(pid)）")
 
         postKey(keyCode: 5, flags: [.maskCommand, .maskShift])   // ⌘⇧G 打开「前往文件夹」
+        pollGoToFolder(pid: pid, path: path, attempt: 0)
+    }
 
-        // 「前往文件夹」的 sheet 要过一会儿才出现，过早写入会被丢掉
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self else { return }
-            if !self.fillGoToFolder(pid: pid, path: path) {
-                logger.notice("前往文件夹输入框不可写，回退逐字注入")
-                self.dumpAXTree(pid: pid, to: "/tmp/recentfolder-goto-dump.txt")
-                self.typeText(path)
-            }
+    /// 「前往文件夹」sheet 一出现就立刻写路径并回车。
+    /// 原先固定等 1 秒再写、再等 0.5 秒回车，加上 sheet 自身的动画约 1.6 秒才有反应；
+    /// 改成 40ms 轮询后通常 0.1 秒内就写进去，视觉上近乎点一下就到。
+    private func pollGoToFolder(pid: pid_t, path: String, attempt: Int) {
+        // 40ms × 50 次 = 2 秒还没出现就放弃
+        guard attempt < 50 else {
+            let front = NSWorkspace.shared.frontmostApplication
+            logger.error("前往文件夹窗口始终没有出现，放弃跳转（前台=\(front?.localizedName ?? "?", privacy: .public) pid=\(front?.processIdentifier ?? -1)，目标 pid=\(pid)）")
+            return
+        }
+        if fillGoToFolder(pid: pid, path: path) {
             // 这个 sheet 没有确认按钮，只能靠 Return 提交。
             // 只用无修饰键的 Return，避免和微信截图（⌘⇧A）之类的全局快捷键打架。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.postKey(keyCode: 36, flags: [])
-            }
+            postKey(keyCode: 36, flags: [])
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+            self?.pollGoToFolder(pid: pid, path: path, attempt: attempt + 1)
         }
     }
 
@@ -282,19 +245,6 @@ final class SavePanelWatcher {
         up?.flags = flags
         down?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)
-    }
-
-    private func typeText(_ text: String) {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        for scalar in text.utf16 {
-            var unit = scalar
-            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { continue }
-            down.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unit)
-            up.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unit)
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
-        }
     }
 }
 
