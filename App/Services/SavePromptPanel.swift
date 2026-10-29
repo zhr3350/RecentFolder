@@ -19,18 +19,28 @@ final class SavePromptPanel {
     private var strip: StripPanel?
     private var watchdog: Timer?
     private var pickHandler: ((String) -> Void)?
+    /// 复用 SavePanelWatcher 的识别逻辑判断面板是否还在，
+    /// 避免两处判定标准不一致导致小条刚出现就被收走
+    private var isAlive: (() -> Bool)?
 
     private init() {}
 
     // MARK: - 展示 / 收起
 
-    func present(near axPanel: AXUIElement, folders: [FolderRecord], onPick: @escaping (String) -> Void) {
+    func present(near axPanel: AXUIElement,
+                 folders: [FolderRecord],
+                 isAlive: @escaping () -> Bool,
+                 onPick: @escaping (String) -> Void) {
         guard !folders.isEmpty else { return }
         dismiss()
         pickHandler = onPick
+        self.isAlive = isAlive
 
-        // 与保存面板等宽，视觉上像是面板长出来的一截
-        let width = max(300, axFrame(of: axPanel)?.width ?? 380)
+        // 宽度对齐保存面板，但给上限：某些 App 的「面板」其实是挂在文档窗口里的
+        // sheet，AX 上报的是整个窗口的尺寸，直接跟随会横跨半个屏幕。
+        let panelFrame = axFrame(of: axPanel)
+        let width = min(max(panelFrame?.width ?? 380, 320), 460)
+        logger.notice("保存面板 frame=\(String(describing: panelFrame), privacy: .public)，小条宽度=\(width)")
 
         let view = SavePromptView(
             folders: folders,
@@ -68,16 +78,15 @@ final class SavePromptPanel {
 
         strip = window
 
-        var pid: pid_t = 0
-        AXUIElementGetPid(axPanel, &pid)
-        startWatchdog(pid: pid)
-        logger.notice("已浮出候选小条，\(folders.count) 个候选")
+        startWatchdog()
+        logger.notice("已浮出候选小条，\(folders.count) 个候选，位置 \(NSStringFromRect(window.frame), privacy: .public)")
     }
 
     func dismiss() {
         watchdog?.invalidate()
         watchdog = nil
         pickHandler = nil
+        isAlive = nil
         strip?.orderOut(nil)
         strip?.contentView = nil
         strip = nil
@@ -86,12 +95,13 @@ final class SavePromptPanel {
     // MARK: - 跟随保存面板
 
     /// 保存面板一旦真的消失就收起小条，但判定要宽容：
-    /// - AX 查询偶发失败不能算「面板消失」，连续两次查不到才收（约 1 秒）
+    /// - 面板是否还在，直接复用 SavePanelWatcher 的识别逻辑，保证两侧标准一致
+    /// - AX 查询偶发失败不能算「面板消失」，连续三次查不到才收（约 1.5 秒）
     /// - 不按「前台 App 是否等于面板 pid」判断。沙盒 App 的保存面板由
     ///   com.apple.appkit.xpc.openAndSavePanelService 代开，pid 天生不一致，
     ///   按前台判断会在 1.5 秒内误收小条。
-    /// - 上限从 25 秒放宽到 2 分钟，用户输文件名时不会被打断。
-    private func startWatchdog(pid: pid_t) {
+    /// - 上限 2 分钟，用户输文件名时不会被打断。
+    private func startWatchdog() {
         let startedAt = Date()
         var missCount = 0
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -101,29 +111,18 @@ final class SavePromptPanel {
                 self.dismiss()
                 return
             }
-            if self.hasSavePanel(pid: pid) {
+            if self.isAlive?() ?? false {
                 missCount = 0
                 return
             }
             missCount += 1
-            if missCount >= 2 {
+            if missCount >= 3 {
                 self.logger.notice("保存面板已消失，收起小条")
                 self.dismiss()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         watchdog = timer
-    }
-
-    private func hasSavePanel(pid: pid_t) -> Bool {
-        let app = AXUIElementCreateApplication(pid)
-        for window in elements(app, kAXWindowsAttribute) {
-            if identifier(window) == "save-panel" { return true }
-            for sheet in elements(window, "AXSheets") where identifier(sheet) == "save-panel" {
-                return true
-            }
-        }
-        return false
     }
 
     // MARK: - 位置
@@ -148,10 +147,12 @@ final class SavePromptPanel {
             $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY))
         }?.visibleFrame ?? fallbackVisible
 
-        // 贴在面板正下方，左边缘对齐（宽度相同，所以就是整块对齐）
+        // 贴在面板正下方，左边缘对齐
         var point = NSPoint(x: anchor.minX, y: anchor.minY - size.height - 8)
         if point.y < visible.minY + 8 {
-            point.y = anchor.maxY + 8          // 下方放不下就翻到上方
+            // 面板贴着屏幕底部时，宁可放在屏幕最下方，也不翻到菜单栏下面——
+            // 那样会离面板很远，反而挡住别的窗口标题栏
+            point.y = visible.minY + 8
         }
         point.x = min(max(point.x, visible.minX + 8), visible.maxX - size.width - 8)
         point.y = min(max(point.y, visible.minY + 8), visible.maxY - size.height - 8)

@@ -142,29 +142,47 @@ final class SavePanelWatcher {
         // 面板的位置和尺寸要等它布局完成才稳定，稍等再贴上去
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             guard let self else { return }
-            SavePromptPanel.shared.present(near: panel, folders: candidates) { path in
+            SavePromptPanel.shared.present(
+                near: panel,
+                folders: candidates,
+                isAlive: { [weak self] in self?.isPanelAlive(pid: pid) ?? false }
+            ) { path in
                 self.jump(pid: pid, to: path)
             }
         }
     }
 
-    /// 保存面板可能是独立窗口，也可能挂在窗口的 AXSheets 里
+    /// 复用与检测完全相同的识别逻辑，避免小条刚出现就被误判成「面板已消失」
+    func isPanelAlive(pid: pid_t) -> Bool {
+        findSavePanel(in: AXUIElementCreateApplication(pid)) != nil
+    }
+
+    /// 保存面板可能是独立窗口，也可能是挂在文档窗口里的 sheet。
+    /// 注意 sheet 不一定出现在 AXSheets 里：TextEdit 的保存框就是
+    /// window/AXChildren 下的 `AXSheet id=save-panel`，外层窗口的 subrole
+    /// 同时会变成 AXDialog、尺寸仍是整个文档窗口。所以必须先找
+    /// `save-panel` 本体，找不到才退回「窗口里有文件名输入框」的判断。
     private func findSavePanel(in appElement: AXUIElement) -> AXUIElement? {
         for window in elements(appElement, kAXWindowsAttribute) {
-            if isSavePanel(window) { return window }
-            for sheet in elements(window, "AXSheets") where isSavePanel(sheet) {
-                return sheet
-            }
+            if string(window, kAXIdentifierAttribute) == "save-panel" { return window }
+            if let sheet = savePanelDescendant(of: window, depth: 0) { return sheet }
+        }
+        for window in elements(appElement, kAXWindowsAttribute) where hasNameField(in: window, depth: 0) {
+            return window
         }
         return nil
     }
 
-    private func isSavePanel(_ element: AXUIElement) -> Bool {
-        // 系统保存面板的 AXIdentifier 固定为 "save-panel"（role=AXWindow，subrole=AXDialog），
-        // 这是最可靠的特征；注意它没有 AXSaveButton 属性，保存按钮的 id 是 "OKButton"。
-        if string(element, kAXIdentifierAttribute) == "save-panel" { return true }
-        // 兜底：面板里存在文件名输入框（打开面板没有这个字段）
-        return hasNameField(in: element, depth: 0)
+    private func savePanelDescendant(of element: AXUIElement, depth: Int) -> AXUIElement? {
+        guard depth < 5 else { return nil }
+        for child in elements(element, kAXChildrenAttribute) {
+            if string(child, kAXIdentifierAttribute) == "save-panel" { return child }
+            if let found = savePanelDescendant(of: child, depth: depth + 1) { return found }
+        }
+        for sheet in elements(element, "AXSheets") {
+            if string(sheet, kAXIdentifierAttribute) == "save-panel" { return sheet }
+        }
+        return nil
     }
 
     private func hasNameField(in element: AXUIElement, depth: Int) -> Bool {
