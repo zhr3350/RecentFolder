@@ -220,8 +220,8 @@ private struct SavePromptView: View {
     @State private var hoveredPath: String?
     @State private var copiedPath: String?
 
-    /// 底部圆角比系统面板略大一点，方角会让小条显得更宽
-    private let cornerRadius: CGFloat = 14
+    /// 底部圆角要比面板更大一点，方角会让小条显得更宽
+    private let cornerRadius: CGFloat = 20
 
     var body: some View {
         VStack(spacing: 0) {
@@ -236,8 +236,12 @@ private struct SavePromptView: View {
         // 顶部两角做成直角：小条要零缝隙贴在保存面板下方，
         // 留圆角的话交界处会露出去两个小缺口，看起来像没贴住。
         .clipShape(shape)
-        // 只描左、右、下三边。顶边再画一道线，等于在贴合处划出一条「缝」
-        .overlay(ThreeSideBorder(cornerRadius: cornerRadius).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+        // 只描左、右、下三边。顶边再画一道线，等于在贴合处划出一条「缝」；
+        // 0.5pt 是 Retina 上的一个像素，比 1pt 细一半
+        .overlay(
+            ThreeSideBorder(cornerRadius: cornerRadius)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+        )
     }
 
     private var shape: UnevenRoundedRectangle {
