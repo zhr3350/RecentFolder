@@ -1,0 +1,14 @@
+# 编译产物（由 script/build_and_run.sh 生成，可随时重建）
+build/
+DerivedData/
+
+# Xcode 用户级设置（每个人本机不同）
+xcuserdata/
+*.xcuserstate
+
+# macOS 系统文件
+.DS_Store
+
+# 编辑器临时文件
+*.swp
+*~

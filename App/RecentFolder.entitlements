@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  主 App 保持非沙盒：保存对话框的辅助功能自动化需要它。
+
+	  若已配置开发者 Team，可启用下面两项以获得真正的 App Group 共享目录：
+	  <key>com.apple.security.application-groups</key>
+	  <array>
+	    <string>group.com.haoran.recentfolder</string>
+	  </array>
+	  启用后把 App Group 标识同步到 Shared/PathHistoryStore.swift 与 FinderExtension.entitlements。
+	-->
+</dict>
+</plist>
