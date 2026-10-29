@@ -40,6 +40,11 @@ end
 
 add_sources(app_target, swift_refs(app_group) + swift_refs(shared_group))
 
+# ---------- 资源（应用图标）----------
+resources_group = project.main_group.new_group('Resources', 'App/Resources')
+icon_ref = resources_group.new_file('AppIcon.icns')
+app_target.resources_build_phase.add_file_reference(icon_ref)
+
 # ---------- 构建设置 ----------
 COMMON = {
   'SWIFT_VERSION' => '5.0',
