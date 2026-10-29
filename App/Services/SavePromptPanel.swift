@@ -5,11 +5,13 @@ import os
 
 /// 保存面板旁边浮出的小条：列出最近几个文件夹，用户点了才跳转。
 ///
-/// 刻意做的三件事：
+/// 刻意做的几件事：
 /// 1. `nonactivatingPanel` —— 点击不会把我们的 App 激活，目标 App 始终留在前台，
 ///    后续注入的 ⌘⇧G 才会发给正确的进程。
-/// 2. 不替用户做任何决定 —— 不点、点关闭，保存面板就停在系统原来的位置。
+/// 2. 不替用户做任何决定 —— 不点，保存面板就停在系统原来的位置。
 /// 3. 保存面板一消失（保存、取消、Esc）小条立刻收起，不留残影。
+/// 4. 面板动、小条跟着动；面板所属 App 不在前台时一块儿藏起来，
+///    避免小条单独浮在别的 App 之上。
 final class SavePromptPanel {
 
     static let shared = SavePromptPanel()
@@ -22,12 +24,16 @@ final class SavePromptPanel {
     /// 复用 SavePanelWatcher 的识别逻辑判断面板是否还在，
     /// 避免两处判定标准不一致导致小条刚出现就被收走
     private var isAlive: (() -> Bool)?
+    /// 面板本体和它所属的进程，用于跟随移动与跟随前后台
+    private var panelRef: AXUIElement?
+    private var panelPID: pid_t = 0
 
     private init() {}
 
     // MARK: - 展示 / 收起
 
     func present(near axPanel: AXUIElement,
+                 ownerPID: pid_t,
                  folders: [FolderRecord],
                  isAlive: @escaping () -> Bool,
                  onPick: @escaping (String) -> Void) {
@@ -35,6 +41,8 @@ final class SavePromptPanel {
         dismiss()
         pickHandler = onPick
         self.isAlive = isAlive
+        panelRef = axPanel
+        panelPID = ownerPID
 
         // 宽度对齐保存面板，但给上限：某些 App 的「面板」其实是挂在文档窗口里的
         // sheet，AX 上报的是整个窗口的尺寸，直接跟随会横跨半个屏幕。
@@ -42,21 +50,12 @@ final class SavePromptPanel {
         let width = min(max(panelFrame?.width ?? 380, 320), 460)
         logger.notice("保存面板 frame=\(String(describing: panelFrame), privacy: .public)，小条宽度=\(width)")
 
-        let view = SavePromptView(
-            folders: folders,
-            width: width,
-            onPick: { [weak self] path in
-                guard let self, let handler = self.pickHandler else { return }
-                logger.notice("用户选择跳转到 \(path, privacy: .public)")
-                dismiss()
-                // 只留最小的间隔，让这次点击先结束，别和注入的按键抢时序
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { handler(path) }
-            },
-            onCancel: { [weak self] in
-                self?.logger.notice("用户关闭了小条，保存面板保持原位")
-                self?.dismiss()
-            }
-        )
+        let view = SavePromptView(folders: folders, width: width) { [weak self] path in
+            guard let self, let handler = self.pickHandler else { return }
+            logger.notice("用户选择 \(path, privacy: .public)，已复制路径，小条保持显示")
+            // 只留最小的间隔，让这次点击先结束，别和注入的按键抢时序
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { handler(path) }
+        }
 
         let hosting = NSHostingView(rootView: view)
         let size = hosting.fittingSize
@@ -77,7 +76,7 @@ final class SavePromptPanel {
         window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         window.contentView = hosting
-        window.setFrameOrigin(origin(for: size, near: axPanel))
+        window.setFrameOrigin(origin(for: size, panelFrame: panelFrame))
         window.orderFrontRegardless()
 
         strip = window
@@ -91,6 +90,8 @@ final class SavePromptPanel {
         watchdog = nil
         pickHandler = nil
         isAlive = nil
+        panelRef = nil
+        panelPID = 0
         strip?.orderOut(nil)
         strip?.contentView = nil
         strip = nil
@@ -98,23 +99,45 @@ final class SavePromptPanel {
 
     // MARK: - 跟随保存面板
 
-    /// 保存面板一旦真的消失就收起小条，但判定要宽容：
-    /// - 面板是否还在，直接复用 SavePanelWatcher 的识别逻辑，保证两侧标准一致
-    /// - AX 查询偶发失败不能算「面板消失」，连续三次查不到才收（约 1.5 秒）
-    /// - 不按「前台 App 是否等于面板 pid」判断。沙盒 App 的保存面板由
-    ///   com.apple.appkit.xpc.openAndSavePanelService 代开，pid 天生不一致，
-    ///   按前台判断会在 1.5 秒内误收小条。
-    /// - 上限 2 分钟，用户输文件名时不会被打断。
+    /// 0.25 秒一拍，做三件事：
+    /// - 跟随面板位置：面板移动（含刚弹出时的动画）时小条贴回去
+    /// - 跟随前后台：面板所属 App 不在前台时把小条藏起来，切回来再露出
+    /// - 面板是否还在：直接复用 SavePanelWatcher 的识别逻辑，保证两侧标准一致。
+    ///   AX 偶发查不到不算消失，连续三次（约 1.5 秒）才收；上限 2 分钟。
     private func startWatchdog() {
         let startedAt = Date()
+        var tick = 0
         var missCount = 0
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self else { return }
+            tick += 1
             if Date().timeIntervalSince(startedAt) > 120 {
                 self.logger.notice("小条超时收起")
                 self.dismiss()
                 return
             }
+
+            if let panel = self.panelRef, let window = self.strip {
+                let point = self.origin(for: window.frame.size, panelFrame: self.axFrame(of: panel))
+                if window.frame.origin != point {
+                    window.setFrameOrigin(point)
+                }
+            }
+
+            // 前后台每拍都看，开销只是一次 NSWorkspace 查询。
+            // 比对的是面板所属的 App，而不是面板窗口自己的 pid：沙盒 App 的保存
+            // 面板由 openAndSavePanelService 代开，那个 pid 永远不是前台。
+            if let window = self.strip {
+                let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                if front == self.panelPID {
+                    window.orderFrontRegardless()
+                } else {
+                    window.orderOut(nil)
+                }
+            }
+
+            // 面板是否还在：AX 树遍历略贵，隔一拍查一次
+            guard tick % 2 == 0 else { return }
             if self.isAlive?() ?? false {
                 missCount = 0
                 return
@@ -131,11 +154,11 @@ final class SavePromptPanel {
 
     // MARK: - 位置
 
-    private func origin(for size: NSSize, near axPanel: AXUIElement) -> NSPoint {
+    private func origin(for size: NSSize, panelFrame frame: NSRect?) -> NSPoint {
         let primary = NSScreen.screens.first
         let fallbackVisible = NSScreen.main?.visibleFrame ?? primary?.visibleFrame ?? .zero
 
-        guard let frame = axFrame(of: axPanel), let primary else {
+        guard let frame, let primary else {
             return NSPoint(x: fallbackVisible.midX - size.width / 2,
                            y: fallbackVisible.midY - size.height / 2)
         }
@@ -193,27 +216,20 @@ private struct SavePromptView: View {
     let folders: [FolderRecord]
     let width: CGFloat
     let onPick: (String) -> Void
-    let onCancel: () -> Void
 
     @State private var hoveredPath: String?
+    @State private var copiedPath: String?
+
+    /// 底部圆角比系统面板略大一点，方角会让小条显得更宽
+    private let cornerRadius: CGFloat = 14
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
-            VStack(spacing: 1) {
-                ForEach(folders) { folder in
-                    row(folder)
-                }
+        VStack(spacing: 0) {
+            ForEach(folders) { folder in
+                row(folder)
             }
-            .padding(.vertical, 4)
-            Divider()
-            Text("不点就保持系统原来的位置")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
         }
+        .padding(.vertical, 3)
         .frame(width: width)
         // 和保存面板的白色内容区对齐，贴在下面才像同一块面板
         .background(Color(nsColor: .textBackgroundColor))
@@ -221,59 +237,41 @@ private struct SavePromptView: View {
         // 留圆角的话交界处会露出去两个小缺口，看起来像没贴住。
         .clipShape(shape)
         // 只描左、右、下三边。顶边再画一道线，等于在贴合处划出一条「缝」
-        .overlay(ThreeSideBorder(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+        .overlay(ThreeSideBorder(cornerRadius: cornerRadius).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
     }
 
     private var shape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
             topLeadingRadius: 0,
-            bottomLeadingRadius: 10,
-            bottomTrailingRadius: 10,
+            bottomLeadingRadius: cornerRadius,
+            bottomTrailingRadius: cornerRadius,
             topTrailingRadius: 0,
             style: .continuous
         )
     }
 
-    private var header: some View {
-        HStack(spacing: 6) {
-            Text("跳到最近文件夹")
-                .font(.system(size: 13, weight: .semibold))
-            Spacer(minLength: 8)
-            Button(action: onCancel) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("关闭，保存面板保持原位")
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 9)
-        .padding(.bottom, 8)
-    }
-
     private func row(_ folder: FolderRecord) -> some View {
         Button {
+            copy(folder.path)
             onPick(folder.path)
         } label: {
-            HStack(spacing: 9) {
+            HStack(spacing: 8) {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: folder.path))
                     .resizable()
-                    .frame(width: 18, height: 18)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(folder.displayName)
-                        .font(.system(size: 13))
-                        .lineLimit(1)
-                    Text(folder.path)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+                    .frame(width: 16, height: 16)
+                Text(folder.path)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Spacer(minLength: 0)
+                if copiedPath == folder.path {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
             }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -290,6 +288,18 @@ private struct SavePromptView: View {
             }
         }
         .padding(.horizontal, 5)
+        .help("点击跳转到该文件夹，并复制它的路径")
+    }
+
+    /// 复制路径，小条不收起：可能只是想拿路径去粘贴，也可能要连着跳几个位置。
+    private func copy(_ path: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(path, forType: .string)
+        copiedPath = path
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if copiedPath == path { copiedPath = nil }
+        }
     }
 }
 

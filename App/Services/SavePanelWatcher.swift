@@ -144,6 +144,7 @@ final class SavePanelWatcher {
             guard let self else { return }
             SavePromptPanel.shared.present(
                 near: panel,
+                ownerPID: pid,
                 folders: candidates,
                 isAlive: { [weak self] in self?.isPanelAlive(pid: pid) ?? false }
             ) { path in
