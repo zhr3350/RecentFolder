@@ -1,6 +1,10 @@
 # 编译产物（由 script/build_and_run.sh 生成，可随时重建）
 build/
 DerivedData/
+dist/
+
+# 二进制图标：源码里没有，需要自行放进 App/Resources/
+App/Resources/AppIcon.icns
 
 # Xcode 用户级设置（每个人本机不同）
 xcuserdata/
@@ -12,3 +16,6 @@ xcuserdata/
 # 编辑器临时文件
 *.swp
 *~
+
+# 本地截图
+menubar-preview.png

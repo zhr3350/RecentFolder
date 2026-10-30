@@ -23,9 +23,19 @@ echo "    构建成功"
 # ~/Applications 不受 iCloud 管理，xattr 清得干净，签名才能成功。
 INSTALL="$HOME/Applications/RecentFolder.app"
 
-# 构建目录里那份 App 之前被手动启动过也会留在后台，统一按 bundle 路径前缀全部清掉，
-# 否则会出现多个菜单栏图标
-pkill -f "RecentFolder.app/Contents/MacOS/RecentFolder" 2>/dev/null || true
+# 构建目录里那份 App 之前被手动启动过也会留在后台，统一清掉，否则会出现多个菜单栏图标。
+# 必须先彻底杀掉再复制：杀不掉会一直开着旧二进制，看起来像"新代码没生效"。
+kill_app() {
+  local pattern="$1"
+  pkill -f "$pattern" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    pgrep -f "$pattern" >/dev/null 2>&1 || return 0
+    sleep 0.2
+  done
+  pkill -9 -f "$pattern" 2>/dev/null || true
+  sleep 0.3
+}
+kill_app "RecentFolder.app/Contents/MacOS/RecentFolder"
 echo "==> 复制到 $INSTALL"
 rm -rf "$INSTALL"
 mkdir -p "$HOME/Applications"
@@ -54,8 +64,7 @@ if [ "${1:-}" = "--verify" ]; then
 fi
 
 echo "==> 启动"
-pkill -f "$INSTALL/Contents/MacOS/RecentFolder" 2>/dev/null || true
-sleep 1
+kill_app "$INSTALL/Contents/MacOS/RecentFolder"
 open "$INSTALL"
 
 if [ "${1:-}" = "--logs" ]; then

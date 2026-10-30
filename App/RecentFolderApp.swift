@@ -1,13 +1,17 @@
 import SwiftUI
 import AppKit
+import os
 
 @main
 struct RecentFolderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra("最近文件夹", systemImage: "folder.badge.gearshape") {
+        MenuBarExtra {
             HistoryPanelView(model: appDelegate.historyModel, permissions: appDelegate.permissions)
+        } label: {
+            Image(nsImage: MenuBarIcon.image)
+                .renderingMode(.template)
         }
         .menuBarExtraStyle(.window)
     }
@@ -19,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let permissions = PermissionCenter.shared
     private let savePanelWatcher = SavePanelWatcher()
     private let finderPathTracker = FinderPathTracker()
+    private let logger = Logger(subsystem: SharedPaths.logSubsystem, category: "status")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         permissions.startPolling()
@@ -28,6 +33,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         finderPathTracker.start()
         savePanelWatcher.start()
-        NSLog("[RecentFolder] launched, history=\(SharedPaths.historyFileURL.path)")
+        logger.notice("启动完成")
     }
 }

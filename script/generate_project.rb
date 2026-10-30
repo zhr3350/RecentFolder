@@ -41,9 +41,15 @@ end
 add_sources(app_target, swift_refs(app_group) + swift_refs(shared_group))
 
 # ---------- 资源（应用图标）----------
+# 图标是二进制，不进版本库；缺失时跳过，App 会用系统默认图标正常构建
 resources_group = project.main_group.new_group('Resources', 'App/Resources')
-icon_ref = resources_group.new_file('AppIcon.icns')
-app_target.resources_build_phase.add_file_reference(icon_ref)
+icon_path = File.join(ROOT, 'App/Resources/AppIcon.icns')
+if File.exist?(icon_path)
+  icon_ref = resources_group.new_file('AppIcon.icns')
+  app_target.resources_build_phase.add_file_reference(icon_ref)
+else
+  puts '提示：未找到 App/Resources/AppIcon.icns，本次构建使用系统默认图标'
+end
 
 # ---------- 构建设置 ----------
 COMMON = {
