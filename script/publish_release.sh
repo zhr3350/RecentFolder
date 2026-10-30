@@ -5,6 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# 兼容 gh 装在 ~/.local/bin（不经过 Homebrew 的安装方式）
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 REPO="${REPO:-zhr3350/RecentFolder}"
 VERSION="0.1.0-beta.1"
 TAG="v$VERSION"
