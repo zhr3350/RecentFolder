@@ -41,6 +41,16 @@ ruby script/generate_project.rb   # 生成 RecentFolder.xcodeproj
 
 应用图标（`App/Resources/AppIcon.icns`）是二进制资源，不随仓库分发，缺失时构建会使用系统默认图标。
 
+## 发布（维护者）
+
+```bash
+brew install gh && gh auth login          # 只需一次
+CONFIG=Release ./script/build_and_run.sh --verify
+ditto -c -k --sequesterRsrc --keepParent ~/Applications/RecentFolder.app \
+  dist/RecentFolder-0.1.0-beta.1.zip
+./script/publish_release.sh               # 建仓 + 推源码 + 建 Pre-release 并上传 zip
+```
+
 ## 已知限制
 
 - 未做 Developer ID 签名与公证，其他机器首次打开需要右键「打开」
